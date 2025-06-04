@@ -1,27 +1,8 @@
-import React, { useState, useRef } from 'react'
-import { MapContainer, TileLayer, Marker, Popup, GeoJSON, useMapEvents } from 'react-leaflet'
-import L from 'leaflet'
-import 'leaflet/dist/leaflet.css'
-
-// Fix for default markers in react-leaflet
-delete L.Icon.Default.prototype._getIconUrl
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
-  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-})
+import React, { useState, useRef, useCallback } from 'react'
+import Map, { Source, Layer, Marker, Popup } from 'react-map-gl/maplibre'
+import 'maplibre-gl/dist/maplibre-gl.css'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-
-// Custom hook for handling map clicks
-function MapClickHandler({ onMapClick }) {
-  useMapEvents({
-    click(e) {
-      onMapClick(e.latlng)
-    },
-  })
-  return null
-}
 
 function App() {
   const [clickedPoint, setClickedPoint] = useState(null)
@@ -30,20 +11,23 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [showAllParks, setShowAllParks] = useState(false)
+  const [showPopup, setShowPopup] = useState(false)
   const mapRef = useRef()
 
-  const handleMapClick = async (latlng) => {
-    setClickedPoint(latlng)
+  const handleMapClick = useCallback(async (event) => {
+    const { lngLat } = event
+    setClickedPoint(lngLat)
     setLoading(true)
     setError(null)
+    setShowPopup(true)
     
     try {
       // Create a Point GeoJSON from the clicked coordinates
       const pointGeoJSON = {
         type: "Point",
-        coordinates: [latlng.lng, latlng.lat]
+        coordinates: [lngLat.lng, lngLat.lat]
       }
-
+      
       const response = await fetch(`${API_URL}/api/nearest-parks`, {
         method: 'POST',
         headers: {
@@ -53,11 +37,11 @@ function App() {
           geojson: pointGeoJSON
         }),
       })
-
+      
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
-
+      
       const data = await response.json()
       setNearestParks(data)
       
@@ -67,7 +51,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
   const loadAllParks = async () => {
     setLoading(true)
@@ -79,7 +63,7 @@ function App() {
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
-
+      
       const data = await response.json()
       setAllParks(data)
       setShowAllParks(true)
@@ -97,7 +81,29 @@ function App() {
     setNearestParks(null)
     setAllParks(null)
     setShowAllParks(false)
+    setShowPopup(false)
     setError(null)
+  }
+
+  // Layer styles for GeoJSON data
+  const nearestParksLayerStyle = {
+    id: 'nearest-parks',
+    type: 'fill',
+    paint: {
+      'fill-color': '#2ecc71',
+      'fill-opacity': 0.7,
+      'fill-outline-color': '#27ae60'
+    }
+  }
+
+  const allParksLayerStyle = {
+    id: 'all-parks',
+    type: 'fill',
+    paint: {
+      'fill-color': '#3498db',
+      'fill-opacity': 0.5,
+      'fill-outline-color': '#2980b9'
+    }
   }
 
   return (
@@ -163,75 +169,80 @@ function App() {
 
       {/* Map */}
       <div style={{ flex: 1, position: 'relative' }}>
-        <MapContainer
-          center={[40.7589, -73.9851]} // New York City
-          zoom={10}
-          style={{ height: '100%', width: '100%' }}
+        <Map
           ref={mapRef}
+          initialViewState={{
+            longitude: -73.9851,
+            latitude: 40.7589,
+            zoom: 10
+          }}
+          style={{ width: '100%', height: '100%' }}
+          mapStyle={{
+            version: 8,
+            sources: {
+              'carto-light': {
+                type: 'raster',
+                tiles: [
+                  'https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
+                  'https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
+                  'https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png',
+                  'https://d.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png'
+                ],
+                tileSize: 256,
+                attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>'
+              }
+            },
+            layers: [
+              {
+                id: 'carto-light-layer',
+                type: 'raster',
+                source: 'carto-light',
+                minzoom: 0,
+                maxzoom: 22
+              }
+            ]
+          }}
+          onClick={handleMapClick}
         >
-          <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-          
-          <MapClickHandler onMapClick={handleMapClick} />
-          
+          {/* All parks layer */}
+          {showAllParks && allParks && (
+            <Source id="all-parks-source" type="geojson" data={allParks}>
+              <Layer {...allParksLayerStyle} />
+            </Source>
+          )}
+
+          {/* Nearest parks layer */}
+          {nearestParks && (
+            <Source id="nearest-parks-source" type="geojson" data={nearestParks}>
+              <Layer {...nearestParksLayerStyle} />
+            </Source>
+          )}
+
           {/* Clicked point marker */}
           {clickedPoint && (
-            <Marker position={[clickedPoint.lat, clickedPoint.lng]}>
-              <Popup>
-                <div>
-                  <strong>Clicked Location</strong><br />
-                  Lat: {clickedPoint.lat.toFixed(6)}<br />
-                  Lng: {clickedPoint.lng.toFixed(6)}
-                </div>
-              </Popup>
-            </Marker>
-          )}
-          
-          {/* Nearest parks */}
-          {nearestParks && (
-            <GeoJSON 
-              data={nearestParks}
-              style={{
-                fillColor: '#2ecc71',
-                weight: 2,
-                opacity: 1,
-                color: '#27ae60',
-                fillOpacity: 0.7
-              }}
-              onEachFeature={(feature, layer) => {
-                layer.bindPopup(`
-                  <div>
-                    <strong>${feature.properties.name}</strong><br />
-                    Distance: ${feature.properties.distance_meters}m
-                  </div>
-                `)
-              }}
+            <Marker
+              longitude={clickedPoint.lng}
+              latitude={clickedPoint.lat}
+              color="red"
             />
           )}
-          
-          {/* All parks */}
-          {showAllParks && allParks && (
-            <GeoJSON 
-              data={allParks}
-              style={{
-                fillColor: '#3498db',
-                weight: 2,
-                opacity: 1,
-                color: '#2980b9',
-                fillOpacity: 0.5
-              }}
-              onEachFeature={(feature, layer) => {
-                layer.bindPopup(`
-                  <div>
-                    <strong>${feature.properties.name}</strong>
-                  </div>
-                `)
-              }}
-            />
+
+          {/* Popup for clicked point */}
+          {clickedPoint && showPopup && (
+            <Popup
+              longitude={clickedPoint.lng}
+              latitude={clickedPoint.lat}
+              anchor="bottom"
+              onClose={() => setShowPopup(false)}
+            >
+              <div>
+                <strong>Clicked Location</strong><br />
+                Lat: {clickedPoint.lat.toFixed(6)}<br />
+                Lng: {clickedPoint.lng.toFixed(6)}
+              </div>
+            </Popup>
           )}
-        </MapContainer>
+        </Map>
         
         {/* Results panel */}
         {nearestParks && (
