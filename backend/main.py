@@ -127,7 +127,7 @@ async def find_nearest_nationalparke(request: GeoJSONRequest):
         geometry_json = json.dumps(geometry)
         
         async with AsyncSessionLocal() as session:
-            # Query to find 5 nearest nationalparke with CRS transformation
+            # Query to find nationalparke within 50km with CRS transformation
             # Input geometry is in EPSG:4326, database geometries are in EPSG:3035
             query = text("""
                 SELECT 
@@ -137,10 +137,13 @@ async def find_nearest_nationalparke(request: GeoJSONRequest):
                     ST_Distance(
                         ST_Transform(geom, 4326)::geography, 
                         ST_GeomFromGeoJSON(:geom)::geography
-                    ) as distance_meters
+                    ) / 1000.0 as distance_km
                 FROM nationalparke 
+                WHERE ST_Distance(
+                    ST_Transform(geom, 4326)::geography, 
+                    ST_GeomFromGeoJSON(:geom)::geography
+                ) <= 50000
                 ORDER BY ST_Transform(geom, 4326)::geography <-> ST_GeomFromGeoJSON(:geom)::geography
-                LIMIT 5
             """)
             
             result = await session.execute(query, {"geom": geometry_json})
@@ -155,7 +158,7 @@ async def find_nearest_nationalparke(request: GeoJSONRequest):
                     "properties": {
                         "id": park.id,
                         "name": park.name,
-                        "distance_meters": round(park.distance_meters, 2)
+                        "distance_km": round(park.distance_km, 2)
                     },
                     "geometry": geometry_dict
                 }

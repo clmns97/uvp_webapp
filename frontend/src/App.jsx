@@ -266,7 +266,7 @@ function App() {
                 borderRadius: '4px'
               }}>
                 <strong>{park.properties.name}</strong><br />
-                <small>{park.properties.distance_meters}m away</small>
+                <small>{park.properties.distance_km}km away</small>
               </div>
             ))}
           </div>
