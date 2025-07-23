@@ -7,11 +7,12 @@ from sqlalchemy.orm import sessionmaker
 from geoalchemy2 import Geometry
 from geoalchemy2.functions import ST_Distance, ST_GeomFromGeoJSON, ST_AsGeoJSON
 from shapely.geometry import shape
+from pyproj import Transformer, CRS
 import json
 import os
 import subprocess
 import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
@@ -94,6 +95,94 @@ AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=F
 class GeoJSONRequest(BaseModel):
     geojson: Dict[str, Any]
 
+class TransformGeoJSONRequest(BaseModel):
+    geojson: Dict[str, Any]
+    source_crs: Optional[str] = None  # e.g., "EPSG:3035"
+
+def detect_crs_from_geojson(geojson_data: Dict[str, Any]) -> Optional[str]:
+    """
+    Try to detect CRS from GeoJSON.
+    Returns EPSG code as string or None if not found.
+    """
+    # Check for CRS in the GeoJSON crs property
+    if "crs" in geojson_data:
+        crs_info = geojson_data["crs"]
+        if isinstance(crs_info, dict):
+            if "properties" in crs_info and "name" in crs_info["properties"]:
+                crs_name = crs_info["properties"]["name"]
+                if isinstance(crs_name, str):
+                    # Handle different CRS name formats
+                    if "EPSG:" in crs_name:
+                        return crs_name
+                    elif crs_name.startswith("urn:ogc:def:crs:EPSG::"):
+                        epsg_code = crs_name.split("::")[-1]
+                        return f"EPSG:{epsg_code}"
+    
+    return None
+
+def transform_geojson_coordinates(geojson_data: Dict[str, Any], source_crs: str, target_crs: str = "EPSG:4326") -> Dict[str, Any]:
+    """
+    Transform GeoJSON coordinates from source CRS to target CRS.
+    """
+    if source_crs == target_crs:
+        return geojson_data
+    
+    try:
+        # Create transformer
+        transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+        
+        def transform_coordinates(coords):
+            """Recursively transform coordinates based on geometry type"""
+            if not coords:
+                return coords
+                
+            # Check if this is a coordinate pair [x, y] or [x, y, z]
+            if isinstance(coords[0], (int, float)):
+                if len(coords) >= 2:
+                    x, y = transformer.transform(coords[0], coords[1])
+                    return [x, y] + coords[2:]  # Keep any additional dimensions
+                return coords
+            else:
+                # Recursively transform nested coordinate arrays
+                return [transform_coordinates(coord) for coord in coords]
+        
+        def transform_geometry(geometry):
+            """Transform a single geometry"""
+            if not geometry or "coordinates" not in geometry:
+                return geometry
+            
+            transformed_geometry = geometry.copy()
+            transformed_geometry["coordinates"] = transform_coordinates(geometry["coordinates"])
+            return transformed_geometry
+        
+        # Create a copy of the input data
+        result = json.loads(json.dumps(geojson_data))
+        
+        # Transform based on GeoJSON type
+        if result["type"] == "FeatureCollection":
+            for feature in result.get("features", []):
+                if "geometry" in feature and feature["geometry"]:
+                    feature["geometry"] = transform_geometry(feature["geometry"])
+        elif result["type"] == "Feature":
+            if "geometry" in result and result["geometry"]:
+                result["geometry"] = transform_geometry(result["geometry"])
+        else:
+            # Direct geometry object
+            result = transform_geometry(result)
+        
+        # Update or add CRS information
+        result["crs"] = {
+            "type": "name",
+            "properties": {
+                "name": target_crs
+            }
+        }
+        
+        return result
+        
+    except Exception as e:
+        raise ValueError(f"Failed to transform coordinates from {source_crs} to {target_crs}: {str(e)}")
+
 @app.get("/")
 async def root():
     return {"message": "GeoJSON nationalparke Finder API"}
@@ -173,6 +262,98 @@ async def find_nearest_nationalparke(request: GeoJSONRequest):
             
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+
+@app.post("/api/transform-geojson")
+async def transform_geojson(request: TransformGeoJSONRequest):
+    """
+    Transform GeoJSON from any supported CRS to WGS84 (EPSG:4326).
+    Detects CRS automatically or uses provided source_crs.
+    """
+    try:
+        geojson_data = request.geojson
+        source_crs = request.source_crs
+        
+        # Validate GeoJSON structure
+        if "type" not in geojson_data:
+            raise HTTPException(status_code=400, detail="Invalid GeoJSON: missing 'type' field")
+        
+        # Try to detect CRS if not provided
+        if not source_crs:
+            detected_crs = detect_crs_from_geojson(geojson_data)
+            if detected_crs:
+                source_crs = detected_crs
+                print(f"Detected CRS: {source_crs}")
+            else:
+                # Check coordinate ranges to guess CRS
+                # This is a heuristic approach - not always accurate
+                coords = []
+                
+                def extract_coords(obj):
+                    if isinstance(obj, dict):
+                        if obj.get("type") == "FeatureCollection":
+                            for feature in obj.get("features", []):
+                                extract_coords(feature)
+                        elif obj.get("type") == "Feature":
+                            extract_coords(obj.get("geometry", {}))
+                        elif "coordinates" in obj:
+                            coords.extend(flatten_coordinates(obj["coordinates"]))
+                
+                def flatten_coordinates(coord_array):
+                    """Flatten nested coordinate arrays to get all coordinate pairs"""
+                    result = []
+                    if isinstance(coord_array, list) and len(coord_array) > 0:
+                        if isinstance(coord_array[0], (int, float)):
+                            # This is a coordinate pair
+                            if len(coord_array) >= 2:
+                                result.append((coord_array[0], coord_array[1]))
+                        else:
+                            # Nested array
+                            for item in coord_array:
+                                result.extend(flatten_coordinates(item))
+                    return result
+                
+                extract_coords(geojson_data)
+                
+                if coords:
+                    # Check if coordinates are in typical EPSG:3035 range (Europe)
+                    x_coords = [c[0] for c in coords[:10]]  # Sample first 10 coordinates
+                    y_coords = [c[1] for c in coords[:10]]
+                    
+                    # EPSG:3035 typically has coordinates in millions for Europe
+                    if (min(x_coords) > 1000000 and max(x_coords) < 8000000 and 
+                        min(y_coords) > 1000000 and max(y_coords) < 6000000):
+                        source_crs = "EPSG:3035"
+                        print(f"Guessed CRS based on coordinate range: {source_crs}")
+                    elif (min(x_coords) >= -180 and max(x_coords) <= 180 and 
+                          min(y_coords) >= -90 and max(y_coords) <= 90):
+                        # Already in WGS84
+                        return {
+                            "transformed_geojson": geojson_data,
+                            "source_crs": "EPSG:4326",
+                            "target_crs": "EPSG:4326",
+                            "message": "GeoJSON is already in WGS84 (EPSG:4326)"
+                        }
+        
+        if not source_crs:
+            raise HTTPException(
+                status_code=400, 
+                detail="Could not detect CRS. Please specify source_crs parameter (e.g., 'EPSG:3035')"
+            )
+        
+        # Transform to WGS84
+        transformed_geojson = transform_geojson_coordinates(geojson_data, source_crs, "EPSG:4326")
+        
+        return {
+            "transformed_geojson": transformed_geojson,
+            "source_crs": source_crs,
+            "target_crs": "EPSG:4326",
+            "message": f"Successfully transformed from {source_crs} to EPSG:4326"
+        }
+        
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error transforming GeoJSON: {str(e)}")
 
 @app.get("/api/all-nationalparke")
 async def get_all_nationalparke():

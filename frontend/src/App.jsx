@@ -12,30 +12,26 @@ function App() {
   const [error, setError] = useState(null)
   const [showAllnationalparke, setShowAllnationalparke] = useState(false)
   const [showPopup, setShowPopup] = useState(false)
+  
+  // New state for GeoJSON file handling
+  const [uploadedGeoJSON, setUploadedGeoJSON] = useState(null)
+  const [isDragging, setIsDragging] = useState(false)
+  const [fileName, setFileName] = useState('')
+  
   const mapRef = useRef()
 
-  const handleMapClick = useCallback(async (event) => {
-    const { lngLat } = event
-    setClickedPoint(lngLat)
+  // Helper function to find nearest nationalparke for any geometry
+  const findNearestParks = useCallback(async (geojson) => {
     setLoading(true)
     setError(null)
-    setShowPopup(true)
     
     try {
-      // Create a Point GeoJSON from the clicked coordinates
-      const pointGeoJSON = {
-        type: "Point",
-        coordinates: [lngLat.lng, lngLat.lat]
-      }
-      
       const response = await fetch(`${API_URL}/api/nearest-nationalparke`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          geojson: pointGeoJSON
-        }),
+        body: JSON.stringify({ geojson }),
       })
       
       if (!response.ok) {
@@ -52,6 +48,205 @@ function App() {
       setLoading(false)
     }
   }, [])
+
+  const handleMapClick = useCallback(async (event) => {
+    const { lngLat } = event
+    setClickedPoint(lngLat)
+    setShowPopup(true)
+    
+    // Create a Point GeoJSON from the clicked coordinates
+    const pointGeoJSON = {
+      type: "Point",
+      coordinates: [lngLat.lng, lngLat.lat]
+    }
+    
+    await findNearestParks(pointGeoJSON)
+  }, [findNearestParks])
+
+  // Helper function to calculate bounds for any geometry type
+  const calculateBounds = useCallback((geojson) => {
+    let bounds = null
+    
+    const addCoordinateToBounds = (coord) => {
+      const [lng, lat] = coord
+      if (!bounds) {
+        bounds = { minLng: lng, maxLng: lng, minLat: lat, maxLat: lat }
+      } else {
+        bounds.minLng = Math.min(bounds.minLng, lng)
+        bounds.maxLng = Math.max(bounds.maxLng, lng)
+        bounds.minLat = Math.min(bounds.minLat, lat)
+        bounds.maxLat = Math.max(bounds.maxLat, lat)
+      }
+    }
+    
+    const processGeometry = (geometry) => {
+      if (!geometry || !geometry.coordinates) return
+      
+      switch (geometry.type) {
+        case 'Point':
+          addCoordinateToBounds(geometry.coordinates)
+          break
+        case 'LineString':
+          geometry.coordinates.forEach(addCoordinateToBounds)
+          break
+        case 'Polygon':
+          // For polygons, we only need the outer ring (first array)
+          geometry.coordinates[0].forEach(addCoordinateToBounds)
+          break
+        case 'MultiPoint':
+          geometry.coordinates.forEach(addCoordinateToBounds)
+          break
+        case 'MultiLineString':
+          geometry.coordinates.forEach(lineString => {
+            lineString.forEach(addCoordinateToBounds)
+          })
+          break
+        case 'MultiPolygon':
+          geometry.coordinates.forEach(polygon => {
+            // For each polygon, use the outer ring (first array)
+            polygon[0].forEach(addCoordinateToBounds)
+          })
+          break
+      }
+    }
+    
+    if (geojson.type === 'FeatureCollection') {
+      geojson.features.forEach(feature => {
+        if (feature.geometry) {
+          processGeometry(feature.geometry)
+        }
+      })
+    } else if (geojson.type === 'Feature') {
+      if (geojson.geometry) {
+        processGeometry(geojson.geometry)
+      }
+    } else {
+      // Direct geometry object
+      processGeometry(geojson)
+    }
+    
+    return bounds
+  }, [])
+
+  // Drag and drop handlers
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault()
+    setIsDragging(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault()
+    setIsDragging(false)
+  }, [])
+
+  const handleDrop = useCallback(async (e) => {
+    e.preventDefault()
+    setIsDragging(false)
+    
+    const files = Array.from(e.dataTransfer.files)
+    const geoJsonFile = files.find(file => 
+      file.type === 'application/json' || 
+      file.name.toLowerCase().endsWith('.geojson') ||
+      file.name.toLowerCase().endsWith('.json')
+    )
+    
+    if (!geoJsonFile) {
+      setError('Please drop a valid GeoJSON file (.json or .geojson)')
+      return
+    }
+    
+    try {
+      const text = await geoJsonFile.text()
+      let geojson = JSON.parse(text)
+      
+      // Validate GeoJSON structure
+      if (!geojson.type) {
+        throw new Error('Invalid GeoJSON: missing type field')
+      }
+      
+      // Clear previous results
+      setClickedPoint(null)
+      setShowPopup(false)
+      setError(null)
+      setLoading(true)
+      
+      // Check if GeoJSON needs coordinate transformation
+      try {
+        const transformResponse = await fetch(`${API_URL}/api/transform-geojson`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ geojson }),
+        })
+        
+        if (transformResponse.ok) {
+          const transformData = await transformResponse.json()
+          
+          if (transformData.source_crs !== "EPSG:4326") {
+            // Use the transformed GeoJSON
+            geojson = transformData.transformed_geojson
+            setError(`📍 Transformed from ${transformData.source_crs} to WGS84`)
+            // Clear the error after a few seconds to show it as info
+            setTimeout(() => {
+              setError(null)
+            }, 5000)
+          }
+        } else {
+          const errorData = await transformResponse.json()
+          throw new Error(errorData.detail || 'CRS transformation failed')
+        }
+      } catch (transformError) {
+        console.warn('CRS transformation failed:', transformError.message)
+        setError(`⚠️ CRS check failed: ${transformError.message}. Assuming WGS84.`)
+        // Continue with original GeoJSON, assuming it's in WGS84
+      }
+      
+      // Set the uploaded GeoJSON for display
+      setUploadedGeoJSON(geojson)
+      setFileName(geoJsonFile.name)
+      
+      // Find nearest nationalparke for the uploaded geometry
+      await findNearestParks(geojson)
+      
+      // Fit map to bounds of uploaded GeoJSON
+      if (mapRef.current) {
+        const bounds = calculateBounds(geojson)
+        
+        if (bounds) {
+          // Add some padding to ensure the geometry is fully visible
+          const padding = 0.01 // degrees
+          mapRef.current.fitBounds([
+            [bounds.minLng - padding, bounds.minLat - padding],
+            [bounds.maxLng + padding, bounds.maxLat + padding]
+          ], { padding: 50 })
+        }
+      }
+      
+    } catch (err) {
+      setError(`Error processing GeoJSON file: ${err.message}`)
+      console.error('Error:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [findNearestParks, calculateBounds])
+
+  // File input handler (alternative to drag and drop)
+  const handleFileInput = useCallback(async (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    
+    // Create a mock drop event to reuse the same logic
+    const mockDropEvent = {
+      preventDefault: () => {},
+      dataTransfer: { files: [file] }
+    }
+    
+    await handleDrop(mockDropEvent)
+    
+    // Clear the input so the same file can be selected again
+    e.target.value = ''
+  }, [handleDrop])
 
   const loadAllnationalparke = async () => {
     setLoading(true)
@@ -82,6 +277,8 @@ function App() {
     setAllnationalparke(null)
     setShowAllnationalparke(false)
     setShowPopup(false)
+    setUploadedGeoJSON(null)
+    setFileName('')
     setError(null)
   }
 
@@ -106,6 +303,41 @@ function App() {
     }
   }
 
+  // Updated styles for uploaded GeoJSON - optimized for polygons
+  const uploadedGeoJSONFillLayerStyle = {
+    id: 'uploaded-geojson-fill',
+    type: 'fill',
+    paint: {
+      'fill-color': '#e74c3c',
+      'fill-opacity': 0.4,
+      'fill-outline-color': '#c0392b'
+    },
+    filter: ['in', '$type', 'Polygon']
+  }
+
+  const uploadedGeoJSONLineLayerStyle = {
+    id: 'uploaded-geojson-line',
+    type: 'line',
+    paint: {
+      'line-color': '#c0392b',
+      'line-width': 3,
+      'line-opacity': 0.8
+    },
+    filter: ['in', '$type', 'LineString']
+  }
+
+  const uploadedGeoJSONPointLayerStyle = {
+    id: 'uploaded-geojson-points',
+    type: 'circle',
+    paint: {
+      'circle-radius': 8,
+      'circle-color': '#e74c3c',
+      'circle-stroke-color': '#c0392b',
+      'circle-stroke-width': 2
+    },
+    filter: ['==', '$type', 'Point']
+  }
+
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
@@ -117,7 +349,7 @@ function App() {
       }}>
         <h1 style={{ margin: 0, fontSize: '1.5rem' }}>GeoJSON nationalparke Finder</h1>
         <p style={{ margin: '0.5rem 0 0 0', opacity: 0.8 }}>
-          Click on the map to find the 5 nearest nationalparke
+          Click on the map or drag & drop a GeoJSON file to find nearest nationalparke
         </p>
       </div>
 
@@ -128,7 +360,8 @@ function App() {
         borderBottom: '1px solid #bdc3c7',
         display: 'flex',
         gap: '1rem',
-        alignItems: 'center'
+        alignItems: 'center',
+        flexWrap: 'wrap'
       }}>
         <button 
           onClick={loadAllnationalparke}
@@ -146,6 +379,23 @@ function App() {
           {loading ? 'Loading...' : 'Show All nationalparke'}
         </button>
         
+        <label style={{
+          background: '#9b59b6',
+          color: 'white',
+          padding: '0.5rem 1rem',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          display: 'inline-block'
+        }}>
+          Upload GeoJSON
+          <input
+            type="file"
+            accept=".json,.geojson"
+            onChange={handleFileInput}
+            style={{ display: 'none' }}
+          />
+        </label>
+        
         <button 
           onClick={clearResults}
           style={{
@@ -160,6 +410,18 @@ function App() {
           Clear Results
         </button>
 
+        {fileName && (
+          <div style={{ 
+            background: '#27ae60', 
+            color: 'white', 
+            padding: '0.5rem 1rem',
+            borderRadius: '4px',
+            fontSize: '0.9rem'
+          }}>
+            📁 {fileName}
+          </div>
+        )}
+
         {error && (
           <div style={{ color: '#e74c3c', fontWeight: 'bold' }}>
             {error}
@@ -168,7 +430,34 @@ function App() {
       </div>
 
       {/* Map */}
-      <div style={{ flex: 1, position: 'relative' }}>
+      <div 
+        style={{ flex: 1, position: 'relative' }}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {/* Drag overlay */}
+        {isDragging && (
+          <div style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(52, 152, 219, 0.8)',
+            zIndex: 2000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'white',
+            fontSize: '2rem',
+            fontWeight: 'bold',
+            pointerEvents: 'none'
+          }}>
+            Drop GeoJSON file here
+          </div>
+        )}
+
         <Map
           ref={mapRef}
           initialViewState={{
@@ -208,6 +497,15 @@ function App() {
           {showAllnationalparke && allnationalparke && (
             <Source id="all-nationalparke-source" type="geojson" data={allnationalparke}>
               <Layer {...allnationalparkeLayerStyle} />
+            </Source>
+          )}
+
+          {/* Uploaded GeoJSON layer */}
+          {uploadedGeoJSON && (
+            <Source id="uploaded-geojson-source" type="geojson" data={uploadedGeoJSON}>
+              <Layer {...uploadedGeoJSONFillLayerStyle} />
+              <Layer {...uploadedGeoJSONLineLayerStyle} />
+              <Layer {...uploadedGeoJSONPointLayerStyle} />
             </Source>
           )}
 
@@ -257,18 +555,27 @@ function App() {
             maxWidth: '300px',
             zIndex: 1000
           }}>
-            <h3 style={{ margin: '0 0 0.5rem 0' }}>Nearest nationalparke</h3>
-            {nearestnationalparke.features.map((park, index) => (
-              <div key={park.properties.id} style={{ 
-                marginBottom: '0.5rem',
-                padding: '0.5rem',
-                background: '#f8f9fa',
-                borderRadius: '4px'
-              }}>
-                <strong>{park.properties.name}</strong><br />
-                <small>{park.properties.distance_km}km away</small>
+            <h3 style={{ margin: '0 0 0.5rem 0' }}>
+              Nearest nationalparke
+              {fileName && <div style={{ fontSize: '0.8rem', color: '#666' }}>for {fileName}</div>}
+            </h3>
+            {nearestnationalparke.features.length === 0 ? (
+              <div style={{ color: '#666', fontStyle: 'italic' }}>
+                No nationalparke found within 50km
               </div>
-            ))}
+            ) : (
+              nearestnationalparke.features.map((park, index) => (
+                <div key={park.properties.id} style={{ 
+                  marginBottom: '0.5rem',
+                  padding: '0.5rem',
+                  background: '#f8f9fa',
+                  borderRadius: '4px'
+                }}>
+                  <strong>{park.properties.name}</strong><br />
+                  <small>{park.properties.distance_km}km away</small>
+                </div>
+              ))
+            )}
           </div>
         )}
       </div>

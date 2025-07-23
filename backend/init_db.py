@@ -109,15 +109,57 @@ def load_wfs_data(db_config):
     wfs_sources = [
         {
             'url': 'https://geodienste.bfn.de/ogc/wfs/schutzgebiet',
+            'layer': 'bfn_sch_Schutzgebiet:Nationale_Naturmonumente',
+            'table': 'nationale_naturmonumente',
+            'description': 'German National Natural Monuments'
+        },
+        {
+            'url': 'https://geodienste.bfn.de/ogc/wfs/schutzgebiet',
+            'layer': 'bfn_sch_Schutzgebiet:Fauna_Flora_Habitat_Gebiete',
+            'table': 'fauna_flora_habitat_gebiete',
+            'description': 'German Fauna-Flora-Habitat Areas'
+        },
+        {
+            'url': 'https://geodienste.bfn.de/ogc/wfs/schutzgebiet',
+            'layer': 'bfn_sch_Schutzgebiet:Vogelschutzgebiete',
+            'table': 'vogelschutzgebiete',
+            'description': 'German Bird Protection Areas'
+        },
+        {
+            'url': 'https://geodienste.bfn.de/ogc/wfs/schutzgebiet',
+            'layer': 'bfn_sch_Schutzgebiet:Biosphaerenreservate',
+            'table': 'biosphaerenreservate',
+            'description': 'German Biosphere Reserves'
+        },
+        {
+            'url': 'https://geodienste.bfn.de/ogc/wfs/schutzgebiet',
+            'layer': 'bfn_sch_Schutzgebiet:Biosphaerenreservate_Zonierung',
+            'table': 'biosphaerenreservate_zonierung',
+            'description': 'German Biosphere Reserve Zoning'
+        },
+        {
+            'url': 'https://geodienste.bfn.de/ogc/wfs/schutzgebiet',
             'layer': 'bfn_sch_Schutzgebiet:Nationalparke',
             'table': 'nationalparke',
             'description': 'German National Parks'
         },
         {
             'url': 'https://geodienste.bfn.de/ogc/wfs/schutzgebiet',
-            'layer': 'bfn_sch_Schutzgebiet:Vogelschutzgebiete',
-            'table': 'vogelschutzgebiete',
-            'description': 'German Vogelschutzgebiete'
+            'layer': 'bfn_sch_Schutzgebiet:Naturparke',
+            'table': 'naturparke',
+            'description': 'German Nature Parks'
+        },
+        {
+            'url': 'https://geodienste.bfn.de/ogc/wfs/schutzgebiet',
+            'layer': 'bfn_sch_Schutzgebiet:Naturschutzgebiete',
+            'table': 'naturschutzgebiete',
+            'description': 'German Nature Reserves'
+        },
+        {
+            'url': 'https://geodienste.bfn.de/ogc/wfs/schutzgebiet',
+            'layer': 'bfn_sch_Schutzgebiet:Landschaftsschutzgebiete',
+            'table': 'landschaftsschutzgebiete',
+            'description': 'German Landscape Protection Areas'
         }
     ]
     
