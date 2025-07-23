@@ -6,7 +6,7 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 function App() {
   const [clickedPoint, setClickedPoint] = useState(null)
-  const [nearestnationalparke, setNearestnationalparke] = useState(null)
+  const [nearestProtectedAreas, setNearestProtectedAreas] = useState(null)
   const [allnationalparke, setAllnationalparke] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -20,13 +20,13 @@ function App() {
   
   const mapRef = useRef()
 
-  // Helper function to find nearest nationalparke for any geometry
-  const findNearestParks = useCallback(async (geojson) => {
+  // Helper function to find nearest protected areas for any geometry
+  const findNearestProtectedAreas = useCallback(async (geojson) => {
     setLoading(true)
     setError(null)
     
     try {
-      const response = await fetch(`${API_URL}/api/nearest-nationalparke`, {
+      const response = await fetch(`${API_URL}/api/nearest-protected-areas`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -39,10 +39,10 @@ function App() {
       }
       
       const data = await response.json()
-      setNearestnationalparke(data)
+      setNearestProtectedAreas(data)
       
     } catch (err) {
-      setError(`Error finding nearest nationalparke: ${err.message}`)
+      setError(`Error finding nearest protected areas: ${err.message}`)
       console.error('Error:', err)
     } finally {
       setLoading(false)
@@ -60,8 +60,8 @@ function App() {
       coordinates: [lngLat.lng, lngLat.lat]
     }
     
-    await findNearestParks(pointGeoJSON)
-  }, [findNearestParks])
+    await findNearestProtectedAreas(pointGeoJSON)
+  }, [findNearestProtectedAreas])
 
   // Helper function to calculate bounds for any geometry type
   const calculateBounds = useCallback((geojson) => {
@@ -206,8 +206,8 @@ function App() {
       setUploadedGeoJSON(geojson)
       setFileName(geoJsonFile.name)
       
-      // Find nearest nationalparke for the uploaded geometry
-      await findNearestParks(geojson)
+      // Find nearest protected areas for the uploaded geometry
+      await findNearestProtectedAreas(geojson)
       
       // Fit map to bounds of uploaded GeoJSON
       if (mapRef.current) {
@@ -229,7 +229,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }, [findNearestParks, calculateBounds])
+  }, [findNearestProtectedAreas, calculateBounds])
 
   // File input handler (alternative to drag and drop)
   const handleFileInput = useCallback(async (e) => {
@@ -273,7 +273,7 @@ function App() {
 
   const clearResults = () => {
     setClickedPoint(null)
-    setNearestnationalparke(null)
+    setNearestProtectedAreas(null)
     setAllnationalparke(null)
     setShowAllnationalparke(false)
     setShowPopup(false)
@@ -282,14 +282,53 @@ function App() {
     setError(null)
   }
 
+  // Helper function to get color for different protected area types
+  const getAreaTypeColor = (areaType) => {
+    const colors = {
+      'National Parks': '#2ecc71',
+      'Nature Parks': '#3498db', 
+      'Nature Reserves': '#e67e22',
+      'Landscape Protection Areas': '#9b59b6',
+      'Biosphere Reserves': '#f39c12',
+      'Bird Protection Areas': '#e74c3c',
+      'Fauna-Flora-Habitat Areas': '#1abc9c',
+      'National Natural Monuments': '#34495e',
+      'Biosphere Reserve Zoning': '#f1c40f'
+    }
+    return colors[areaType] || '#95a5a6'
+  }
+
+  // Group areas by type for better display
+  const groupedAreas = nearestProtectedAreas ? 
+    nearestProtectedAreas.features.reduce((groups, area) => {
+      const type = area.properties.area_type
+      if (!groups[type]) {
+        groups[type] = []
+      }
+      groups[type].push(area)
+      return groups
+    }, {}) : {}
+
   // Layer styles for GeoJSON data
-  const nearestnationalparkeLayerStyle = {
-    id: 'nearest-nationalparke',
+  const nearestProtectedAreasLayerStyle = {
+    id: 'nearest-protected-areas',
     type: 'fill',
     paint: {
-      'fill-color': '#2ecc71',
+      'fill-color': [
+        'case',
+        ['==', ['get', 'area_type'], 'National Parks'], '#2ecc71',
+        ['==', ['get', 'area_type'], 'Nature Parks'], '#3498db',
+        ['==', ['get', 'area_type'], 'Nature Reserves'], '#e67e22',
+        ['==', ['get', 'area_type'], 'Landscape Protection Areas'], '#9b59b6',
+        ['==', ['get', 'area_type'], 'Biosphere Reserves'], '#f39c12',
+        ['==', ['get', 'area_type'], 'Bird Protection Areas'], '#e74c3c',
+        ['==', ['get', 'area_type'], 'Fauna-Flora-Habitat Areas'], '#1abc9c',
+        ['==', ['get', 'area_type'], 'National Natural Monuments'], '#34495e',
+        ['==', ['get', 'area_type'], 'Biosphere Reserve Zoning'], '#f1c40f',
+        '#95a5a6'
+      ],
       'fill-opacity': 0.7,
-      'fill-outline-color': '#27ae60'
+      'fill-outline-color': '#000000'
     }
   }
 
@@ -347,9 +386,9 @@ function App() {
         padding: '1rem',
         boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
       }}>
-        <h1 style={{ margin: 0, fontSize: '1.5rem' }}>GeoJSON nationalparke Finder</h1>
+        <h1 style={{ margin: 0, fontSize: '1.5rem' }}>GeoJSON Protected Areas Finder</h1>
         <p style={{ margin: '0.5rem 0 0 0', opacity: 0.8 }}>
-          Click on the map or drag & drop a GeoJSON file to find nearest nationalparke
+          Click on the map or drag & drop a GeoJSON file to find nearest protected areas
         </p>
       </div>
 
@@ -376,7 +415,7 @@ function App() {
             opacity: loading ? 0.6 : 1
           }}
         >
-          {loading ? 'Loading...' : 'Show All nationalparke'}
+          {loading ? 'Loading...' : 'Show All National Parks'}
         </button>
         
         <label style={{
@@ -492,6 +531,7 @@ function App() {
             ]
           }}
           onClick={handleMapClick}
+          cursor={loading ? 'wait' : 'auto'}
         >
           {/* All nationalparke layer */}
           {showAllnationalparke && allnationalparke && (
@@ -509,10 +549,10 @@ function App() {
             </Source>
           )}
 
-          {/* Nearest nationalparke layer */}
-          {nearestnationalparke && (
-            <Source id="nearest-nationalparke-source" type="geojson" data={nearestnationalparke}>
-              <Layer {...nearestnationalparkeLayerStyle} />
+          {/* Nearest protected areas layer */}
+          {nearestProtectedAreas && (
+            <Source id="nearest-protected-areas-source" type="geojson" data={nearestProtectedAreas}>
+              <Layer {...nearestProtectedAreasLayerStyle} />
             </Source>
           )}
 
@@ -542,8 +582,38 @@ function App() {
           )}
         </Map>
         
+        {/* Loading overlay */}
+        {loading && (
+          <div style={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            background: 'rgba(255, 255, 255, 0.9)',
+            padding: '2rem',
+            borderRadius: '8px',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            zIndex: 1500,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '1rem'
+          }}>
+            <div style={{
+              width: '24px',
+              height: '24px',
+              border: '3px solid #e3e3e3',
+              borderTop: '3px solid #3498db',
+              borderRadius: '50%',
+              animation: 'spin 1s linear infinite'
+            }}></div>
+            <span style={{ fontWeight: 'bold', color: '#2c3e50' }}>
+              Finding nearest protected areas...
+            </span>
+          </div>
+        )}
+        
         {/* Results panel */}
-        {nearestnationalparke && (
+        {nearestProtectedAreas && (
           <div style={{
             position: 'absolute',
             top: '10px',
@@ -552,33 +622,59 @@ function App() {
             padding: '1rem',
             borderRadius: '8px',
             boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
-            maxWidth: '300px',
+            maxWidth: '350px',
+            maxHeight: '70vh',
+            overflowY: 'auto',
             zIndex: 1000
           }}>
             <h3 style={{ margin: '0 0 0.5rem 0' }}>
-              Nearest nationalparke
+              Nearest Protected Areas
               {fileName && <div style={{ fontSize: '0.8rem', color: '#666' }}>for {fileName}</div>}
             </h3>
-            {nearestnationalparke.features.length === 0 ? (
+            {nearestProtectedAreas.features.length === 0 ? (
               <div style={{ color: '#666', fontStyle: 'italic' }}>
-                No nationalparke found within 50km
+                No protected areas found within 50km
               </div>
             ) : (
-              nearestnationalparke.features.map((park, index) => (
-                <div key={park.properties.id} style={{ 
-                  marginBottom: '0.5rem',
-                  padding: '0.5rem',
-                  background: '#f8f9fa',
-                  borderRadius: '4px'
-                }}>
-                  <strong>{park.properties.name}</strong><br />
-                  <small>{park.properties.distance_km}km away</small>
+              Object.entries(groupedAreas).map(([areaType, areas]) => (
+                <div key={areaType} style={{ marginBottom: '1rem' }}>
+                  <h4 style={{ 
+                    margin: '0 0 0.5rem 0', 
+                    color: getAreaTypeColor(areaType),
+                    borderBottom: `2px solid ${getAreaTypeColor(areaType)}`,
+                    paddingBottom: '0.25rem',
+                    fontSize: '0.9rem'
+                  }}>
+                    {areaType} ({areas.length})
+                  </h4>
+                  {areas.map((area, index) => (
+                    <div key={`${area.properties.id}-${index}`} style={{ 
+                      marginBottom: '0.5rem',
+                      padding: '0.5rem',
+                      background: '#f8f9fa',
+                      borderRadius: '4px',
+                      borderLeft: `4px solid ${getAreaTypeColor(areaType)}`
+                    }}>
+                      <strong>{area.properties.name}</strong><br />
+                      <small style={{ color: '#666' }}>
+                        {area.properties.distance_km}km away
+                      </small>
+                    </div>
+                  ))}
                 </div>
               ))
             )}
           </div>
         )}
       </div>
+
+      {/* Add CSS for spinner animation */}
+      <style>{`
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   )
 }

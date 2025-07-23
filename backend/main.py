@@ -15,9 +15,15 @@ import asyncio
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
+import time
+import logging
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("uvp_backend")
 
 async def initialize_database():
     """Initialize database with WFS data if needed"""
@@ -67,7 +73,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     pass
 
-app = FastAPI(title="GeoJSON nationalparke Finder", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="GeoJSON Protected Areas Finder", version="1.0.0", lifespan=lifespan)
 
 # CORS middleware
 app.add_middleware(
@@ -185,14 +191,149 @@ def transform_geojson_coordinates(geojson_data: Dict[str, Any], source_crs: str,
 
 @app.get("/")
 async def root():
-    return {"message": "GeoJSON nationalparke Finder API"}
+    return {"message": "GeoJSON Protected Areas Finder API"}
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
 
+@app.post("/api/nearest-protected-areas")
+async def find_nearest_protected_areas(request: GeoJSONRequest):
+    start_time = time.perf_counter()
+    logger.info("/api/nearest-protected-areas request started")
+    try:
+        geojson_data = request.geojson
+        
+        # Validate GeoJSON structure
+        if "type" not in geojson_data:
+            raise HTTPException(status_code=400, detail="Invalid GeoJSON: missing 'type' field")
+        
+        # Handle different GeoJSON types
+        if geojson_data["type"] == "FeatureCollection":
+            if not geojson_data.get("features"):
+                raise HTTPException(status_code=400, detail="FeatureCollection has no features")
+            # Use the first feature's geometry
+            geometry = geojson_data["features"][0]["geometry"]
+        elif geojson_data["type"] == "Feature":
+            geometry = geojson_data["geometry"]
+        else:
+            # Assume it's a geometry object
+            geometry = geojson_data
+        
+        # Convert geometry to GeoJSON string for PostGIS
+        geometry_json = json.dumps(geometry)
+        
+        # Protected area types with their table names and display names
+        protected_area_types = [
+            ("nationalparke", "National Parks"),
+            ("naturparke", "Nature Parks"),
+            ("naturschutzgebiete", "Nature Reserves"),
+            ("landschaftsschutzgebiete", "Landscape Protection Areas"),
+            ("biosphaerenreservate", "Biosphere Reserves"),
+            ("vogelschutzgebiete", "Bird Protection Areas"),
+            ("fauna_flora_habitat_gebiete", "Fauna-Flora-Habitat Areas"),
+            ("nationale_naturmonumente", "National Natural Monuments"),
+            ("biosphaerenreservate_zonierung", "Biosphere Reserve Zoning")
+        ]
+
+        async def query_single_table(table_name, display_name):
+            table_start = time.perf_counter()
+            logger.info(f"Querying table {table_name} ({display_name})...")
+            try:
+                async with AsyncSessionLocal() as session:
+                    # Check if table exists first
+                    check_query = text("""
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.tables 
+                            WHERE table_schema = 'public' AND table_name = :table_name
+                        );
+                    """)
+                    table_exists = await session.execute(check_query, {"table_name": table_name})
+                    if not table_exists.scalar():
+                        logger.info(f"Table {table_name} does not exist, skipping.")
+                        return []
+
+                    # Transform input geometry to EPSG:3035 (if not already)
+                    input_geom_3035_query = text("""
+                        SELECT ST_Transform(ST_GeomFromGeoJSON(:geom), 3035) AS geom_3035
+                    """)
+                    input_geom_3035_result = await session.execute(input_geom_3035_query, {"geom": geometry_json})
+                    input_geom_3035_wkt = None
+                    row = input_geom_3035_result.fetchone()
+                    if row:
+                        # Get WKT for safe parameter passing
+                        get_wkt_query = text("SELECT ST_AsText(:geom) AS wkt")
+                        wkt_result = await session.execute(get_wkt_query, {"geom": row[0]})
+                        input_geom_3035_wkt = wkt_result.scalar()
+                    if not input_geom_3035_wkt:
+                        logger.error(f"Failed to transform input geometry to EPSG:3035 for {table_name}")
+                        return []
+
+                    # Use geometry functions in native EPSG:3035 (meters)
+                    query = text(f"""
+                        SELECT 
+                            id,
+                            name,
+                            ST_AsGeoJSON(ST_Transform(geom, 4326)) as geometry,
+                            ST_Distance(geom, ST_GeomFromText(:input_geom_3035_wkt, 3035)) / 1000.0 as distance_km,
+                            :area_type as area_type
+                        FROM {table_name}
+                        WHERE ST_DWithin(geom, ST_GeomFromText(:input_geom_3035_wkt, 3035), 50000)
+                        ORDER BY geom <-> ST_GeomFromText(:input_geom_3035_wkt, 3035)
+                        LIMIT 20
+                    """)
+                    result = await session.execute(query, {
+                        "input_geom_3035_wkt": input_geom_3035_wkt,
+                        "area_type": display_name
+                    })
+                    areas = result.fetchall()
+                    logger.info(f"Table {table_name}: {len(areas)} results, took {time.perf_counter() - table_start:.3f}s")
+                    features = []
+                    for area in areas:
+                        geometry_dict = json.loads(area.geometry)
+                        feature = {
+                            "type": "Feature",
+                            "properties": {
+                                "id": area.id,
+                                "name": area.name,
+                                "distance_km": round(area.distance_km, 2),
+                                "area_type": area.area_type,
+                                "table_name": table_name
+                            },
+                            "geometry": geometry_dict
+                        }
+                        features.append(feature)
+                    return features
+            except Exception as e:
+                logger.error(f"Error querying {table_name}: {e}")
+                return []
+
+        # Run all queries in parallel, each with its own session
+        tasks = [
+            query_single_table(table_name, display_name)
+            for table_name, display_name in protected_area_types
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        all_features = []
+        for result in results:
+            if isinstance(result, list):
+                all_features.extend(result)
+            elif isinstance(result, Exception):
+                print(f"Query failed: {result}")
+        all_features.sort(key=lambda x: x["properties"]["distance_km"])
+        response = {
+            "type": "FeatureCollection",
+            "features": all_features
+        }
+        logger.info(f"/api/nearest-protected-areas completed in {time.perf_counter() - start_time:.3f}s, returned {len(all_features)} features")
+        return response
+    except Exception as e:
+        logger.error(f"/api/nearest-protected-areas error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+
 @app.post("/api/nearest-nationalparke")
 async def find_nearest_nationalparke(request: GeoJSONRequest):
+    """Find nearest national parks only (backwards compatibility)"""
     try:
         geojson_data = request.geojson
         
@@ -231,7 +372,7 @@ async def find_nearest_nationalparke(request: GeoJSONRequest):
                 WHERE ST_Distance(
                     ST_Transform(geom, 4326)::geography, 
                     ST_GeomFromGeoJSON(:geom)::geography
-                ) <= 50000
+                ) <= 10000
                 ORDER BY ST_Transform(geom, 4326)::geography <-> ST_GeomFromGeoJSON(:geom)::geography
             """)
             

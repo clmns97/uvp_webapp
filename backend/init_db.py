@@ -95,6 +95,61 @@ def get_table_count(db_config, table_name):
         print(f"⚠️  Could not count records in {table_name}: {e}")
         return 0
 
+def execute_custom_transformations(db_config):
+    """Execute custom SQL transformations to fix column naming issues"""
+    try:
+        conn = psycopg2.connect(**db_config)
+        conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+        cursor = conn.cursor()
+        
+        print("\n🔧 Applying custom table transformations...")
+        
+        # Only transform fauna_flora_habitat_gebiete table
+        if check_table_exists(db_config, "fauna_flora_habitat_gebiete"):
+            print("🔨 Adding name column to fauna_flora_habitat_gebiete from gebietsname...")
+            
+            try:
+                # Check if gebietsname column exists and name doesn't
+                cursor.execute("""
+                    DO $$
+                    BEGIN
+                        IF EXISTS (
+                            SELECT 1 FROM information_schema.columns 
+                            WHERE table_name = 'fauna_flora_habitat_gebiete' 
+                            AND column_name = 'gebietsname'
+                        ) AND NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns 
+                            WHERE table_name = 'fauna_flora_habitat_gebiete' 
+                            AND column_name = 'name'
+                        ) THEN
+                            -- Add name column and copy data from gebietsname
+                            ALTER TABLE fauna_flora_habitat_gebiete ADD COLUMN name VARCHAR;
+                            UPDATE fauna_flora_habitat_gebiete SET name = gebietsname;
+                            RAISE NOTICE 'Added name column to fauna_flora_habitat_gebiete from gebietsname';
+                        ELSE
+                            RAISE NOTICE 'Transformation not needed for fauna_flora_habitat_gebiete';
+                        END IF;
+                    END
+                    $$;
+                """)
+                
+                print("✅ Successfully applied transformation to fauna_flora_habitat_gebiete")
+                
+            except Exception as e:
+                print(f"⚠️  Error applying transformation to fauna_flora_habitat_gebiete: {e}")
+        else:
+            print("⏭️  Skipping fauna_flora_habitat_gebiete - table does not exist")
+        
+        cursor.close()
+        conn.close()
+        
+        print("🎯 Transformation completed")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error during custom transformations: {e}")
+        return False
+
 def load_wfs_data(db_config):
     """Load real data from German BfN WFS services - only for missing tables"""
     
@@ -200,6 +255,7 @@ def load_wfs_data(db_config):
                 '-progress',
                 '-t_srs', 'EPSG:3035',
                 '-lco', 'GEOMETRY_NAME=geom',
+                '-lco', 'FID=id',
                 '-nlt', 'PROMOTE_TO_MULTI',
                 '-nlt', 'CONVERT_TO_LINEAR', 
                 '-nlt', 'MultiPolygon',
@@ -253,9 +309,15 @@ def main():
     
     # Load WFS data (only missing tables)
     if load_wfs_data(db_config):
-        print("🎉 Database initialization completed successfully!")
+        print("🎉 WFS data loading completed!")
     else:
         print("⚠️  No tables were loaded - check WFS connectivity")
+    
+    # Apply custom transformations to fix column naming issues
+    if execute_custom_transformations(db_config):
+        print("🎉 Custom transformations completed!")
+    else:
+        print("⚠️  Custom transformations had issues")
     
     print("✅ Ready for application use!")
 
