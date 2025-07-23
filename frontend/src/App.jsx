@@ -6,11 +6,11 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 function App() {
   const [clickedPoint, setClickedPoint] = useState(null)
-  const [nearestParks, setNearestParks] = useState(null)
-  const [allParks, setAllParks] = useState(null)
+  const [nearestnationalparke, setNearestnationalparke] = useState(null)
+  const [allnationalparke, setAllnationalparke] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [showAllParks, setShowAllParks] = useState(false)
+  const [showAllnationalparke, setShowAllnationalparke] = useState(false)
   const [showPopup, setShowPopup] = useState(false)
   const mapRef = useRef()
 
@@ -28,7 +28,7 @@ function App() {
         coordinates: [lngLat.lng, lngLat.lat]
       }
       
-      const response = await fetch(`${API_URL}/api/nearest-parks`, {
+      const response = await fetch(`${API_URL}/api/nearest-nationalparke`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -43,33 +43,33 @@ function App() {
       }
       
       const data = await response.json()
-      setNearestParks(data)
+      setNearestnationalparke(data)
       
     } catch (err) {
-      setError(`Error finding nearest parks: ${err.message}`)
+      setError(`Error finding nearest nationalparke: ${err.message}`)
       console.error('Error:', err)
     } finally {
       setLoading(false)
     }
   }, [])
 
-  const loadAllParks = async () => {
+  const loadAllnationalparke = async () => {
     setLoading(true)
     setError(null)
     
     try {
-      const response = await fetch(`${API_URL}/api/all-parks`)
+      const response = await fetch(`${API_URL}/api/all-nationalparke`)
       
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
       
       const data = await response.json()
-      setAllParks(data)
-      setShowAllParks(true)
+      setAllnationalparke(data)
+      setShowAllnationalparke(true)
       
     } catch (err) {
-      setError(`Error loading parks: ${err.message}`)
+      setError(`Error loading nationalparke: ${err.message}`)
       console.error('Error:', err)
     } finally {
       setLoading(false)
@@ -78,16 +78,16 @@ function App() {
 
   const clearResults = () => {
     setClickedPoint(null)
-    setNearestParks(null)
-    setAllParks(null)
-    setShowAllParks(false)
+    setNearestnationalparke(null)
+    setAllnationalparke(null)
+    setShowAllnationalparke(false)
     setShowPopup(false)
     setError(null)
   }
 
   // Layer styles for GeoJSON data
-  const nearestParksLayerStyle = {
-    id: 'nearest-parks',
+  const nearestnationalparkeLayerStyle = {
+    id: 'nearest-nationalparke',
     type: 'fill',
     paint: {
       'fill-color': '#2ecc71',
@@ -96,8 +96,8 @@ function App() {
     }
   }
 
-  const allParksLayerStyle = {
-    id: 'all-parks',
+  const allnationalparkeLayerStyle = {
+    id: 'all-nationalparke',
     type: 'fill',
     paint: {
       'fill-color': '#3498db',
@@ -115,9 +115,9 @@ function App() {
         padding: '1rem',
         boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
       }}>
-        <h1 style={{ margin: 0, fontSize: '1.5rem' }}>GeoJSON Parks Finder</h1>
+        <h1 style={{ margin: 0, fontSize: '1.5rem' }}>GeoJSON nationalparke Finder</h1>
         <p style={{ margin: '0.5rem 0 0 0', opacity: 0.8 }}>
-          Click on the map to find the 5 nearest parks
+          Click on the map to find the 5 nearest nationalparke
         </p>
       </div>
 
@@ -131,7 +131,7 @@ function App() {
         alignItems: 'center'
       }}>
         <button 
-          onClick={loadAllParks}
+          onClick={loadAllnationalparke}
           disabled={loading}
           style={{
             background: '#3498db',
@@ -143,7 +143,7 @@ function App() {
             opacity: loading ? 0.6 : 1
           }}
         >
-          {loading ? 'Loading...' : 'Show All Parks'}
+          {loading ? 'Loading...' : 'Show All nationalparke'}
         </button>
         
         <button 
@@ -172,8 +172,8 @@ function App() {
         <Map
           ref={mapRef}
           initialViewState={{
-            longitude: -73.9851,
-            latitude: 40.7589,
+            longitude: 51.416667,
+            latitude: 9.483333,
             zoom: 10
           }}
           style={{ width: '100%', height: '100%' }}
@@ -204,17 +204,17 @@ function App() {
           }}
           onClick={handleMapClick}
         >
-          {/* All parks layer */}
-          {showAllParks && allParks && (
-            <Source id="all-parks-source" type="geojson" data={allParks}>
-              <Layer {...allParksLayerStyle} />
+          {/* All nationalparke layer */}
+          {showAllnationalparke && allnationalparke && (
+            <Source id="all-nationalparke-source" type="geojson" data={allnationalparke}>
+              <Layer {...allnationalparkeLayerStyle} />
             </Source>
           )}
 
-          {/* Nearest parks layer */}
-          {nearestParks && (
-            <Source id="nearest-parks-source" type="geojson" data={nearestParks}>
-              <Layer {...nearestParksLayerStyle} />
+          {/* Nearest nationalparke layer */}
+          {nearestnationalparke && (
+            <Source id="nearest-nationalparke-source" type="geojson" data={nearestnationalparke}>
+              <Layer {...nearestnationalparkeLayerStyle} />
             </Source>
           )}
 
@@ -245,7 +245,7 @@ function App() {
         </Map>
         
         {/* Results panel */}
-        {nearestParks && (
+        {nearestnationalparke && (
           <div style={{
             position: 'absolute',
             top: '10px',
@@ -257,8 +257,8 @@ function App() {
             maxWidth: '300px',
             zIndex: 1000
           }}>
-            <h3 style={{ margin: '0 0 0.5rem 0' }}>Nearest Parks</h3>
-            {nearestParks.features.map((park, index) => (
+            <h3 style={{ margin: '0 0 0.5rem 0' }}>Nearest nationalparke</h3>
+            {nearestnationalparke.features.map((park, index) => (
               <div key={park.properties.id} style={{ 
                 marginBottom: '0.5rem',
                 padding: '0.5rem',
