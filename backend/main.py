@@ -1,110 +1,68 @@
+#!/usr/bin/env python3
+import os
+import logging
+import json
+import time
+import asyncio
+
+from typing import Dict, Any, Optional
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from geoalchemy2 import Geometry
 from geoalchemy2.functions import ST_Distance, ST_GeomFromGeoJSON, ST_AsGeoJSON
 from shapely.geometry import shape
-from pyproj import Transformer, CRS
-import json
-import os
-import subprocess
-import asyncio
-from typing import Dict, Any, List, Optional
+from pyproj import Transformer
 from dotenv import load_dotenv
-from contextlib import asynccontextmanager
-import time
-import logging
 
-# Load environment variables from .env file
+# Load .env in local dev; in Cloud Run env vars will come from the service config
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("uvp_backend")
 
-async def initialize_database():
-    """Initialize database with WFS data if needed"""
-    try:
-        print("🔍 Checking database initialization...")
-        
-        # Set environment variables for the init script
-        env = os.environ.copy()
-        env.update({
-            'POSTGRES_HOST': 'db',  # Docker service name
-            'POSTGRES_PORT': '5432',
-            'POSTGRES_USER': os.getenv('POSTGRES_USER', 'user'),
-            'POSTGRES_PASSWORD': os.getenv('POSTGRES_PASSWORD', 'password'),
-            'POSTGRES_DB': os.getenv('POSTGRES_DB', 'geoapp')
-        })
-        
-        # Run the initialization script
-        result = subprocess.run(
-            ['python3', 'init_db.py'],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=1800  # 30 minute timeout
-        )
-        
-        if result.returncode == 0:
-            print("✅ Database initialization completed successfully")
-            if result.stdout:
-                print(result.stdout)
-        else:
-            print(f"⚠️  Database initialization had issues:")
-            if result.stderr:
-                print(result.stderr)
-            if result.stdout:
-                print(result.stdout)
-                
-    except subprocess.TimeoutExpired:
-        print("⏰ Database initialization timed out")
-    except Exception as e:
-        print(f"❌ Error during database initialization: {e}")
+# FastAPI app
+app = FastAPI(title="GeoJSON Protected Areas Finder", version="1.0.0")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
-    await initialize_database()
-    yield
-    # Shutdown
-    pass
-
-app = FastAPI(title="GeoJSON Protected Areas Finder", version="1.0.0", lifespan=lifespan)
-
-# CORS middleware
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://clmns97.github.io"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],    # <— allow all verbs, including OPTIONS
+    allow_headers=["*"],    # <— allow any header
 )
 
-# Database setup - use environment variables
+# Database connection
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    # Construct from individual components if DATABASE_URL not provided
     host = os.getenv("POSTGRES_HOST", "localhost")
     port = os.getenv("POSTGRES_PORT", "5432")
     user = os.getenv("POSTGRES_USER", "user")
-    password = os.getenv("POSTGRES_PASSWORD", "password")
-    database = os.getenv("POSTGRES_DB", "geoapp")
-    DATABASE_URL = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{database}"
+    pw   = os.getenv("POSTGRES_PASSWORD", "password")
+    db   = os.getenv("POSTGRES_DB", "geoapp")
+    DATABASE_URL = f"postgresql+asyncpg://{user}:{pw}@{host}:{port}/{db}"
 
 engine = create_async_engine(DATABASE_URL)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+# Pydantic models
 class GeoJSONRequest(BaseModel):
     geojson: Dict[str, Any]
 
 class TransformGeoJSONRequest(BaseModel):
     geojson: Dict[str, Any]
-    source_crs: Optional[str] = None  # e.g., "EPSG:3035"
+    source_crs: Optional[str] = None
 
+# CRS detection & transformation
 def detect_crs_from_geojson(geojson_data: Dict[str, Any]) -> Optional[str]:
     """
     Try to detect CRS from GeoJSON.
@@ -189,6 +147,7 @@ def transform_geojson_coordinates(geojson_data: Dict[str, Any], source_crs: str,
     except Exception as e:
         raise ValueError(f"Failed to transform coordinates from {source_crs} to {target_crs}: {str(e)}")
 
+# API endpoints
 @app.get("/")
 async def root():
     return {"message": "GeoJSON Protected Areas Finder API"}
@@ -203,6 +162,7 @@ async def find_nearest_protected_areas(request: GeoJSONRequest):
     logger.info("/api/nearest-protected-areas request started")
     try:
         geojson_data = request.geojson
+        logger.debug("[DEBUG] Received GeoJSON payload: %s", json.dumps(geojson_data))
         
         # Validate GeoJSON structure
         if "type" not in geojson_data:
@@ -241,6 +201,7 @@ async def find_nearest_protected_areas(request: GeoJSONRequest):
             logger.info(f"Querying table {table_name} ({display_name})...")
             try:
                 async with AsyncSessionLocal() as session:
+                    logger.debug("[DEBUG] Checking existence of table %s", table_name)
                     # Check if table exists first
                     check_query = text("""
                         SELECT EXISTS (
@@ -248,23 +209,28 @@ async def find_nearest_protected_areas(request: GeoJSONRequest):
                             WHERE table_schema = 'public' AND table_name = :table_name
                         );
                     """)
-                    table_exists = await session.execute(check_query, {"table_name": table_name})
-                    if not table_exists.scalar():
-                        logger.info(f"Table {table_name} does not exist, skipping.")
+                    table_exists_res = await session.execute(check_query, {"table_name": table_name})
+                    exists = table_exists_res.scalar()
+                    logger.debug("[DEBUG] table %s exists? %s", table_name, exists)
+                    if not exists:
+                        logger.info("Skipping %s – table does not exist", table_name)
                         return []
 
                     # Transform input geometry to EPSG:3035 (if not already)
                     input_geom_3035_query = text("""
                         SELECT ST_Transform(ST_GeomFromGeoJSON(:geom), 3035) AS geom_3035
                     """)
+                    logger.debug("[DEBUG] Transforming input GeoJSON to EPSG:3035")
                     input_geom_3035_result = await session.execute(input_geom_3035_query, {"geom": geometry_json})
                     input_geom_3035_wkt = None
                     row = input_geom_3035_result.fetchone()
+                    logger.debug("[DEBUG] Raw ST_Transform row for %s: %s", table_name, row)
                     if row:
                         # Get WKT for safe parameter passing
                         get_wkt_query = text("SELECT ST_AsText(:geom) AS wkt")
                         wkt_result = await session.execute(get_wkt_query, {"geom": row[0]})
                         input_geom_3035_wkt = wkt_result.scalar()
+                        logger.debug("[DEBUG] WKT for %s: %s", table_name, input_geom_3035_wkt)
                     if not input_geom_3035_wkt:
                         logger.error(f"Failed to transform input geometry to EPSG:3035 for {table_name}")
                         return []
@@ -278,15 +244,20 @@ async def find_nearest_protected_areas(request: GeoJSONRequest):
                             ST_Distance(geom, ST_GeomFromText(:input_geom_3035_wkt, 3035)) / 1000.0 as distance_km,
                             :area_type as area_type
                         FROM {table_name}
-                        WHERE ST_DWithin(geom, ST_GeomFromText(:input_geom_3035_wkt, 3035), 50000)
+                        WHERE ST_DWithin(geom, ST_GeomFromText(:input_geom_3035_wkt, 3035), 10000)
                         ORDER BY geom <-> ST_GeomFromText(:input_geom_3035_wkt, 3035)
-                        LIMIT 20
                     """)
+                    
+                    logger.debug("[DEBUG] Running proximity query on %s", table_name)
+                    logger.debug("[DEBUG] SQL: %s", query.text)
+                    logger.debug("[DEBUG] Params: input_geom_3035_wkt=%s area_type=%s",
+                                 input_geom_3035_wkt, display_name)
                     result = await session.execute(query, {
                         "input_geom_3035_wkt": input_geom_3035_wkt,
                         "area_type": display_name
                     })
                     areas = result.fetchall()
+                    logger.debug("[DEBUG] Raw rows from %s: %r", table_name, areas)
                     logger.info(f"Table {table_name}: {len(areas)} results, took {time.perf_counter() - table_start:.3f}s")
                     features = []
                     for area in areas:
@@ -331,209 +302,19 @@ async def find_nearest_protected_areas(request: GeoJSONRequest):
         logger.error(f"/api/nearest-protected-areas error: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
-@app.post("/api/nearest-nationalparke")
-async def find_nearest_nationalparke(request: GeoJSONRequest):
-    """Find nearest national parks only (backwards compatibility)"""
-    try:
-        geojson_data = request.geojson
-        
-        # Validate GeoJSON structure
-        if "type" not in geojson_data:
-            raise HTTPException(status_code=400, detail="Invalid GeoJSON: missing 'type' field")
-        
-        # Handle different GeoJSON types
-        if geojson_data["type"] == "FeatureCollection":
-            if not geojson_data.get("features"):
-                raise HTTPException(status_code=400, detail="FeatureCollection has no features")
-            # Use the first feature's geometry
-            geometry = geojson_data["features"][0]["geometry"]
-        elif geojson_data["type"] == "Feature":
-            geometry = geojson_data["geometry"]
-        else:
-            # Assume it's a geometry object
-            geometry = geojson_data
-        
-        # Convert geometry to GeoJSON string for PostGIS
-        geometry_json = json.dumps(geometry)
-        
-        async with AsyncSessionLocal() as session:
-            # Query to find nationalparke within 50km with CRS transformation
-            # Input geometry is in EPSG:4326, database geometries are in EPSG:3035
-            query = text("""
-                SELECT 
-                    id,
-                    name,
-                    ST_AsGeoJSON(ST_Transform(geom, 4326)) as geometry,
-                    ST_Distance(
-                        ST_Transform(geom, 4326)::geography, 
-                        ST_GeomFromGeoJSON(:geom)::geography
-                    ) / 1000.0 as distance_km
-                FROM nationalparke 
-                WHERE ST_Distance(
-                    ST_Transform(geom, 4326)::geography, 
-                    ST_GeomFromGeoJSON(:geom)::geography
-                ) <= 10000
-                ORDER BY ST_Transform(geom, 4326)::geography <-> ST_GeomFromGeoJSON(:geom)::geography
-            """)
-            
-            result = await session.execute(query, {"geom": geometry_json})
-            nationalparke = result.fetchall()
-            
-            # Format response as GeoJSON FeatureCollection
-            features = []
-            for park in nationalparke:
-                geometry_dict = json.loads(park.geometry)
-                feature = {
-                    "type": "Feature",
-                    "properties": {
-                        "id": park.id,
-                        "name": park.name,
-                        "distance_km": round(park.distance_km, 2)
-                    },
-                    "geometry": geometry_dict
-                }
-                features.append(feature)
-            
-            response = {
-                "type": "FeatureCollection",
-                "features": features
-            }
-            
-            return response
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
-
 @app.post("/api/transform-geojson")
-async def transform_geojson(request: TransformGeoJSONRequest):
-    """
-    Transform GeoJSON from any supported CRS to WGS84 (EPSG:4326).
-    Detects CRS automatically or uses provided source_crs.
-    """
-    try:
-        geojson_data = request.geojson
-        source_crs = request.source_crs
-        
-        # Validate GeoJSON structure
-        if "type" not in geojson_data:
-            raise HTTPException(status_code=400, detail="Invalid GeoJSON: missing 'type' field")
-        
-        # Try to detect CRS if not provided
-        if not source_crs:
-            detected_crs = detect_crs_from_geojson(geojson_data)
-            if detected_crs:
-                source_crs = detected_crs
-                print(f"Detected CRS: {source_crs}")
-            else:
-                # Check coordinate ranges to guess CRS
-                # This is a heuristic approach - not always accurate
-                coords = []
-                
-                def extract_coords(obj):
-                    if isinstance(obj, dict):
-                        if obj.get("type") == "FeatureCollection":
-                            for feature in obj.get("features", []):
-                                extract_coords(feature)
-                        elif obj.get("type") == "Feature":
-                            extract_coords(obj.get("geometry", {}))
-                        elif "coordinates" in obj:
-                            coords.extend(flatten_coordinates(obj["coordinates"]))
-                
-                def flatten_coordinates(coord_array):
-                    """Flatten nested coordinate arrays to get all coordinate pairs"""
-                    result = []
-                    if isinstance(coord_array, list) and len(coord_array) > 0:
-                        if isinstance(coord_array[0], (int, float)):
-                            # This is a coordinate pair
-                            if len(coord_array) >= 2:
-                                result.append((coord_array[0], coord_array[1]))
-                        else:
-                            # Nested array
-                            for item in coord_array:
-                                result.extend(flatten_coordinates(item))
-                    return result
-                
-                extract_coords(geojson_data)
-                
-                if coords:
-                    # Check if coordinates are in typical EPSG:3035 range (Europe)
-                    x_coords = [c[0] for c in coords[:10]]  # Sample first 10 coordinates
-                    y_coords = [c[1] for c in coords[:10]]
-                    
-                    # EPSG:3035 typically has coordinates in millions for Europe
-                    if (min(x_coords) > 1000000 and max(x_coords) < 8000000 and 
-                        min(y_coords) > 1000000 and max(y_coords) < 6000000):
-                        source_crs = "EPSG:3035"
-                        print(f"Guessed CRS based on coordinate range: {source_crs}")
-                    elif (min(x_coords) >= -180 and max(x_coords) <= 180 and 
-                          min(y_coords) >= -90 and max(y_coords) <= 90):
-                        # Already in WGS84
-                        return {
-                            "transformed_geojson": geojson_data,
-                            "source_crs": "EPSG:4326",
-                            "target_crs": "EPSG:4326",
-                            "message": "GeoJSON is already in WGS84 (EPSG:4326)"
-                        }
-        
-        if not source_crs:
-            raise HTTPException(
-                status_code=400, 
-                detail="Could not detect CRS. Please specify source_crs parameter (e.g., 'EPSG:3035')"
-            )
-        
-        # Transform to WGS84
-        transformed_geojson = transform_geojson_coordinates(geojson_data, source_crs, "EPSG:4326")
-        
-        return {
-            "transformed_geojson": transformed_geojson,
-            "source_crs": source_crs,
-            "target_crs": "EPSG:4326",
-            "message": f"Successfully transformed from {source_crs} to EPSG:4326"
-        }
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error transforming GeoJSON: {str(e)}")
+async def transform_endpoint(request: TransformGeoJSONRequest):
+    geojson = request.geojson
+    src = request.source_crs or detect_crs_from_geojson(geojson)
+    if not src:
+        raise HTTPException(status_code=400, detail="Could not detect CRS")
+    out = transform_geojson_coordinates(geojson, src)
+    return {
+        "transformed_geojson": out,
+        "source_crs": src,
+        "target_crs": "EPSG:4326"
+    }
 
 @app.get("/api/all-nationalparke")
 async def get_all_nationalparke():
-    """Get all nationalparke for debugging/testing purposes"""
-    try:
-        async with AsyncSessionLocal() as session:
-            # Transform geometries from EPSG:3035 to EPSG:4326 for web display
-            query = text("""
-                SELECT 
-                    id,
-                    name,
-                    ST_AsGeoJSON(ST_Transform(geom, 4326)) as geometry
-                FROM nationalparke
-            """)
-            
-            result = await session.execute(query)
-            nationalparke = result.fetchall()
-            
-            features = []
-            for park in nationalparke:
-                geometry_dict = json.loads(park.geometry)
-                feature = {
-                    "type": "Feature",
-                    "properties": {
-                        "id": park.id,
-                        "name": park.name
-                    },
-                    "geometry": geometry_dict
-                }
-                features.append(feature)
-            
-            return {
-                "type": "FeatureCollection",
-                "features": features
-            }
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching nationalparke: {str(e)}")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    raise HTTPException(status_code=501, detail="Not implemented")

@@ -3,6 +3,12 @@
 Comprehensive database initialization script for GeoJSON nationalparke Finder
 Handles PostGIS setup, table creation, and WFS data loading in one place
 """
+from dotenv import load_dotenv
+load_dotenv()
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("init_db")
+
 import os
 import sys
 import time
@@ -10,27 +16,26 @@ import subprocess
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 
-def wait_for_postgres(max_retries=60):
-    """Wait for PostgreSQL to be ready"""
-    db_config = {
-        'host': os.getenv('POSTGRES_HOST', 'db'),  # Use Docker service name
-        'port': os.getenv('POSTGRES_PORT', '5432'),
-        'user': os.getenv('POSTGRES_USER', 'user'),
-        'password': os.getenv('POSTGRES_PASSWORD', 'password'),
-        'database': os.getenv('POSTGRES_DB', 'geoapp')
+def wait_for_postgres(max_retries=30):
+    dsn = os.getenv('IMPORT_DATABASE_URL')
+    conn_args = {'dsn': dsn} if dsn else {
+        'host': os.getenv('IMPORT_PGHOST'),
+        'port': os.getenv('IMPORT_PGPORT'),
+        'user': os.getenv('IMPORT_PGUSER'),
+        'password': os.getenv('IMPORT_PGPASSWORD'),
+        'database': os.getenv('IMPORT_PGDATABASE'),
+        'sslmode': os.getenv('IMPORT_PGSSLMODE', 'require'),
     }
-    
-    for attempt in range(max_retries):
+    for attempt in range(1, max_retries+1):
         try:
-            conn = psycopg2.connect(**db_config)
+            conn = psycopg2.connect(**conn_args)
             conn.close()
-            print(f"✓ PostgreSQL is ready after {attempt + 1} attempts")
-            return db_config
-        except psycopg2.OperationalError:
-            print(f"⏳ Waiting for PostgreSQL... (attempt {attempt + 1}/{max_retries})")
+            print(f"✓ PostgreSQL ready after {attempt} tries")
+            return conn_args
+        except psycopg2.OperationalError as e:
+            print(f"⏳ Waiting for PostgreSQL (attempt {attempt}/{max_retries}): {e}")
             time.sleep(2)
-    
-    print(f"✗ Failed to connect to PostgreSQL after {max_retries} attempts")
+    print(f"✗ Could not connect after {max_retries} attempts")
     sys.exit(1)
 
 def setup_postgis(db_config):
@@ -40,21 +45,21 @@ def setup_postgis(db_config):
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = conn.cursor()
         
-        print("🗺️  Setting up PostGIS extensions...")
+        logger.info("🗺️  Setting up PostGIS extensions...")
         cursor.execute("CREATE EXTENSION IF NOT EXISTS postgis;")
         cursor.execute("CREATE EXTENSION IF NOT EXISTS postgis_topology;")
         
         # Check PostGIS version
         cursor.execute("SELECT PostGIS_Version();")
         version = cursor.fetchone()[0]
-        print(f"✅ PostGIS version: {version}")
+        logger.info(f"✅ PostGIS version: {version}")
             
         cursor.close()
         conn.close()
         return True
         
     except Exception as e:
-        print(f"❌ Error setting up PostGIS: {e}")
+        logger.info(f"❌ Error setting up PostGIS: {e}")
         return False
 
 def check_table_exists(db_config, table_name):
@@ -78,7 +83,7 @@ def check_table_exists(db_config, table_name):
         return exists
         
     except Exception as e:
-        print(f"❌ Error checking table {table_name}: {e}")
+        logger.info(f"❌ Error checking table {table_name}: {e}")
         return False
 
 def get_table_count(db_config, table_name):
@@ -92,7 +97,7 @@ def get_table_count(db_config, table_name):
         conn.close()
         return count
     except Exception as e:
-        print(f"⚠️  Could not count records in {table_name}: {e}")
+        logger.info(f"⚠️  Could not count records in {table_name}: {e}")
         return 0
 
 def execute_custom_transformations(db_config):
@@ -102,11 +107,11 @@ def execute_custom_transformations(db_config):
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cursor = conn.cursor()
         
-        print("\n🔧 Applying custom table transformations...")
+        logger.info("\n🔧 Applying custom table transformations...")
         
         # Only transform fauna_flora_habitat_gebiete table
         if check_table_exists(db_config, "fauna_flora_habitat_gebiete"):
-            print("🔨 Adding name column to fauna_flora_habitat_gebiete from gebietsname...")
+            logger.info("🔨 Adding name column to fauna_flora_habitat_gebiete from gebietsname...")
             
             try:
                 # Check if gebietsname column exists and name doesn't
@@ -133,32 +138,29 @@ def execute_custom_transformations(db_config):
                     $$;
                 """)
                 
-                print("✅ Successfully applied transformation to fauna_flora_habitat_gebiete")
+                logger.info("✅ Successfully applied transformation to fauna_flora_habitat_gebiete")
                 
             except Exception as e:
-                print(f"⚠️  Error applying transformation to fauna_flora_habitat_gebiete: {e}")
+                logger.info(f"⚠️  Error applying transformation to fauna_flora_habitat_gebiete: {e}")
         else:
-            print("⏭️  Skipping fauna_flora_habitat_gebiete - table does not exist")
+            logger.info("⏭️  Skipping fauna_flora_habitat_gebiete - table does not exist")
         
         cursor.close()
         conn.close()
         
-        print("🎯 Transformation completed")
+        logger.info("🎯 Transformation completed")
         return True
         
     except Exception as e:
-        print(f"❌ Error during custom transformations: {e}")
+        logger.info(f"❌ Error during custom transformations: {e}")
         return False
 
 def load_wfs_data(db_config):
     """Load real data from German BfN WFS services - only for missing tables"""
     
     # Database connection string for ogr2ogr - use the Docker service host
-    db_connection = f"PG:host={db_config['host']} " \
-                   f"port={db_config['port']} " \
-                   f"dbname={db_config['database']} " \
-                   f"user={db_config['user']} " \
-                   f"password={db_config['password']}"
+    db_url = os.getenv('IMPORT_DATABASE_URL')
+    db_connection = f"PG:{db_url}"
     
     # WFS sources with updated URLs and layer names
     wfs_sources = [
@@ -221,7 +223,7 @@ def load_wfs_data(db_config):
     success_count = 0
     skipped_count = 0
     
-    print("\n🔍 Checking existing tables...")
+    logger.info("\n🔍 Checking existing tables...")
     
     for source in wfs_sources:
         table_name = source['table']
@@ -230,16 +232,16 @@ def load_wfs_data(db_config):
         if check_table_exists(db_config, table_name):
             record_count = get_table_count(db_config, table_name)
             if record_count > 0:
-                print(f"✅ {table_name} already exists with {record_count} records - skipping")
+                logger.info(f"✅ {table_name} already exists with {record_count} records - skipping")
                 skipped_count += 1
                 continue
             else:
-                print(f"⚠️  {table_name} exists but is empty - reloading...")
+                logger.info(f"⚠️  {table_name} exists but is empty - reloading...")
         else:
-            print(f"❌ {table_name} does not exist - loading...")
+            logger.info(f"❌ {table_name} does not exist - loading...")
         
         try:
-            print(f"\n🌍 Loading {source['description']}...")
+            logger.info(f"\n🌍 Loading {source['description']}...")
             
             # Use ogr2ogr with specific layer targeting to avoid fetching unrelated data
             wfs_url = f"WFS:{source['url']}"
@@ -262,64 +264,64 @@ def load_wfs_data(db_config):
                 '-skipfailures',
                 '-forceNullable',
                 '-makevalid',
-                '--config', 'OGR_WFS_PAGING_ALLOWED', 'OFF',  # Disable automatic paging
-                '--config', 'OGR_WFS_LOAD_MULTIPLE_LAYER_DEFN', 'OFF',  # Only load specified layer
+                '--config', 'OGR_WFS_PAGING_ALLOWED', 'ON',
+                '--config', 'OGR_WFS_PAGE_SIZE', '1000',
                 '--config', 'CPL_DEBUG', 'OFF'  # Reduce verbose output
             ]
             
-            print(f"📡 Fetching layer '{source['layer']}' from WFS...")
-            print(f"🔗 URL: {wfs_url}")
+            logger.info(f"📡 Fetching layer '{source['layer']}' from WFS...")
+            logger.info(f"🔗 URL: {wfs_url}")
             
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)  # 15 min timeout
             
             if result.returncode == 0:
                 count = get_table_count(db_config, source['table'])
-                print(f"✅ {source['table']} loaded successfully with {count} records!")
+                logger.info(f"✅ {source['table']} loaded successfully with {count} records!")
                 success_count += 1
                     
             else:
-                print(f"❌ Error loading {source['table']}:")
-                print(f"   STDERR: {result.stderr}")
-                print(f"   STDOUT: {result.stdout}")
+                logger.info(f"❌ Error loading {source['table']}:")
+                logger.info(f"   STDERR: {result.stderr}")
+                logger.info(f"   STDOUT: {result.stdout}")
                 
         except subprocess.TimeoutExpired:
-            print(f"⏰ Timeout loading {source['table']}")
+            logger.info(f"⏰ Timeout loading {source['table']}")
         except Exception as e:
-            print(f"❌ Error loading {source['table']}: {e}")
+            logger.info(f"❌ Error loading {source['table']}: {e}")
     
     total_processed = success_count + skipped_count
-    print(f"\n🎯 WFS Loading Summary:")
-    print(f"   📊 {success_count} tables loaded from WFS")
-    print(f"   ⏭️  {skipped_count} tables skipped (already exist)")
-    print(f"   ✅ {total_processed}/{len(wfs_sources)} tables ready")
+    logger.info(f"\n🎯 WFS Loading Summary:")
+    logger.info(f"   📊 {success_count} tables loaded from WFS")
+    logger.info(f"   ⏭️  {skipped_count} tables skipped (already exist)")
+    logger.info(f"   ✅ {total_processed}/{len(wfs_sources)} tables ready")
     
     return total_processed > 0
 
 def main():
     """Main initialization function"""
-    print("🚀 Starting database initialization...")
+    logger.info("🚀 Starting database initialization...")
     
     # Wait for PostgreSQL
     db_config = wait_for_postgres()
     
     # Setup PostGIS and tables
     if not setup_postgis(db_config):
-        print("❌ PostGIS setup failed!")
+        logger.info("❌ PostGIS setup failed!")
         sys.exit(1)
     
     # Load WFS data (only missing tables)
     if load_wfs_data(db_config):
-        print("🎉 WFS data loading completed!")
+        logger.info("🎉 WFS data loading completed!")
     else:
-        print("⚠️  No tables were loaded - check WFS connectivity")
+        logger.info("⚠️  No tables were loaded - check WFS connectivity")
     
     # Apply custom transformations to fix column naming issues
     if execute_custom_transformations(db_config):
-        print("🎉 Custom transformations completed!")
+        logger.info("🎉 Custom transformations completed!")
     else:
-        print("⚠️  Custom transformations had issues")
+        logger.info("⚠️  Custom transformations had issues")
     
-    print("✅ Ready for application use!")
+    logger.info("✅ Ready for application use!")
 
 if __name__ == "__main__":
     main()

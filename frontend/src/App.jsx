@@ -7,10 +7,8 @@ const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 function App() {
   const [clickedPoint, setClickedPoint] = useState(null)
   const [nearestProtectedAreas, setNearestProtectedAreas] = useState(null)
-  const [allnationalparke, setAllnationalparke] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [showAllnationalparke, setShowAllnationalparke] = useState(false)
   const [showPopup, setShowPopup] = useState(false)
   
   // New state for GeoJSON file handling
@@ -248,34 +246,9 @@ function App() {
     e.target.value = ''
   }, [handleDrop])
 
-  const loadAllnationalparke = async () => {
-    setLoading(true)
-    setError(null)
-    
-    try {
-      const response = await fetch(`${API_URL}/api/all-nationalparke`)
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-      
-      const data = await response.json()
-      setAllnationalparke(data)
-      setShowAllnationalparke(true)
-      
-    } catch (err) {
-      setError(`Error loading nationalparke: ${err.message}`)
-      console.error('Error:', err)
-    } finally {
-      setLoading(false)
-    }
-  }
-
   const clearResults = () => {
     setClickedPoint(null)
     setNearestProtectedAreas(null)
-    setAllnationalparke(null)
-    setShowAllnationalparke(false)
     setShowPopup(false)
     setUploadedGeoJSON(null)
     setFileName('')
@@ -327,18 +300,8 @@ function App() {
         ['==', ['get', 'area_type'], 'Biosphere Reserve Zoning'], '#f1c40f',
         '#95a5a6'
       ],
-      'fill-opacity': 0.7,
+      'fill-opacity': 0.3,
       'fill-outline-color': '#000000'
-    }
-  }
-
-  const allnationalparkeLayerStyle = {
-    id: 'all-nationalparke',
-    type: 'fill',
-    paint: {
-      'fill-color': '#3498db',
-      'fill-opacity': 0.5,
-      'fill-outline-color': '#2980b9'
     }
   }
 
@@ -402,22 +365,6 @@ function App() {
         alignItems: 'center',
         flexWrap: 'wrap'
       }}>
-        <button 
-          onClick={loadAllnationalparke}
-          disabled={loading}
-          style={{
-            background: '#3498db',
-            color: 'white',
-            border: 'none',
-            padding: '0.5rem 1rem',
-            borderRadius: '4px',
-            cursor: loading ? 'not-allowed' : 'pointer',
-            opacity: loading ? 0.6 : 1
-          }}
-        >
-          {loading ? 'Loading...' : 'Show All National Parks'}
-        </button>
-        
         <label style={{
           background: '#9b59b6',
           color: 'white',
@@ -500,9 +447,9 @@ function App() {
         <Map
           ref={mapRef}
           initialViewState={{
-            longitude: 51.416667,
-            latitude: 9.483333,
-            zoom: 10
+            longitude: 10.4515,
+            latitude: 51.1657,
+            zoom: 5
           }}
           style={{ width: '100%', height: '100%' }}
           mapStyle={{
@@ -533,12 +480,6 @@ function App() {
           onClick={handleMapClick}
           cursor={loading ? 'wait' : 'auto'}
         >
-          {/* All nationalparke layer */}
-          {showAllnationalparke && allnationalparke && (
-            <Source id="all-nationalparke-source" type="geojson" data={allnationalparke}>
-              <Layer {...allnationalparkeLayerStyle} />
-            </Source>
-          )}
 
           {/* Uploaded GeoJSON layer */}
           {uploadedGeoJSON && (
@@ -633,7 +574,7 @@ function App() {
             </h3>
             {nearestProtectedAreas.features.length === 0 ? (
               <div style={{ color: '#666', fontStyle: 'italic' }}>
-                No protected areas found within 50km
+                No protected areas found within 10km
               </div>
             ) : (
               Object.entries(groupedAreas).map(([areaType, areas]) => (
